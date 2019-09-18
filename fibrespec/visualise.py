@@ -17,7 +17,7 @@ def view_slice(image,
     elif axis != 0:
         raise ValueError("Axis must be 0 or 1, got {}.".format(axis))
 
-    projection = np.ma.sum(trimmed_data, axis=0)
+    projection = np.ma.mean(trimmed_data, axis=0)
 
     figure_ar = fig_size[0] / fig_size[1]
     slice_ar = trimmed_data.shape[1] / trimmed_data.shape[0]

@@ -4,8 +4,7 @@ import numpy as np
 
 
 def initialise_tramlines(tram_coef_file, window, width, background_width=None):
-    """
-    Used tramline fit from tram_coef to produce a list of tuples of arrays, each tuple contains
+    """Used tramline fit from tram_coef to produce a list of tuples of arrays, each tuple contains
     the y and x coordinates of the pixels to include in the extraction for a given fibre. When
     formatted in this way each item in the list can be used directly to index the image data.
 
