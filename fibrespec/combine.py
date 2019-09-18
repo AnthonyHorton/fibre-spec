@@ -11,8 +11,13 @@ def process_fits(fitspath, *,
                  obstype=None,
                  object=None,
                  exposure_times=None,
+                 percentile=None,
+                 percentile_min=None,
+                 percentile_max=None,
                  window=None,
                  darks=None,
+                 normalise=False,
+                 normalise_func=np.ma.average,
                  combine_type=None,
                  sigma_clip=False,
                  low_thresh=3,
@@ -34,12 +39,25 @@ def process_fits(fitspath, *,
     exposure_times: float or sequence, optional
         Exposure time(s), i.e 'TOTALEXP' FITS header value(s). If given only files with matching
         TOTALEXP will be processed.
+    percentile: float, optional
+        If given will only images whose percentile value fall between percentile_min and
+        percentile_max will be processed, e.g. set to 50.0 to select images by median value,
+        set to 99.5 to select images by their 99.5th percentile value.
+    percentile_min: float, optional
+        Minimum percentile value.
+    percentile_max: float, optional
+        Maximum percentil value.
     window: (int, int, int, int), optional
         If given will trim images to the window defined as (x0, y0, x1, y1), where (x0, y0)
         and (x1, y1) are the coordinates of the bottom left and top right corners.
     darks: str or sequence, optional
         Filename(s) of dark frame(s) to subtract from the image(s). If given a dark frame with
         matching TOTALEXP will be subtracted from each image during processing.
+    normalise: bool, optional
+        If True each image will be normalised. Default False.
+    normalise_func: callable, optional
+        Function to use for normalisation. Each image will be divided by normalise_func(image).
+        Default np.ma.average.
     combine_type: str, optional
         Type of image combination to use, 'MEAN' or 'MEDIAN'. If None the individual
         images will be processed but not combined and the return value will be a list of
@@ -90,13 +108,15 @@ def process_fits(fitspath, *,
             raise RuntimeError("No FITS files found in {}".format(fitspath))
         # Filter by observation type.
         if obstype:
-            ifc = ifc.filter(obstype=obstype)
-            if len(ifc.files) == 0:
-                raise Runtimeerror("No FITS files with OBSTYPE={}.".format(obstype))
+            try:
+                ifc = ifc.filter(obstype=obstype)
+            except FileNotFoundError:
+                raise RuntimeError("No FITS files with OBSTYPE={}.".format(obstype))
         # Filter by object name.
         if object:
-            ifc = ifc.filter(object=object)
-            if len(ifc.files) == 0:
+            try:
+                ifc = ifc.filter(object=object)
+            except FileNotFoundError:
                 raise RuntimeError("No FITS files with OBJECT={}.".format(object))
         filenames = ifc.files
     else:
@@ -105,18 +125,31 @@ def process_fits(fitspath, *,
     # Load image(s) and process them.
     images = []
     for filename in filenames:
-        ccdata = CCDData.read(filename, unit='adu')
+        ccddata = CCDData.read(filename, unit='adu')
         # Filtering by exposure times here because it's hard filter ImageFileCollection
         # with an indeterminate number of possible values.
         if not exposure_times or ccddata.header['totalexp'] in exposure_times:
-            if dark_dict:
+            if window:
+                ccddata = trim_image(ccddata[window[1]:window[3]+1, window[0]:window[2]+1])
+
+            if percentile:
+                # Check percentile value is within specified range, otherwise skip to next image.
+                percentile_value = np.percentile(ccddata.data, percentile)
+                if percentile_value < percentile_min or percentile_value > percentile_max:
+                    continue
+
+            if darks:
                 try:
-                    dark = dark_dict[ccddata.header['totalexp']]
+                    ccddata = subtract_dark(ccddata,
+                                            dark_dict[ccddata.header['totalexp']],
+                                            exposure_time='totalexp',
+                                            exposure_unit=u.second)
                 except KeyError:
                     raise RuntimeError("No dark with matching totalexp for {}.".format(filename))
-            else:
-                dark = None
-            ccddata = process_image(ccddata, window=window, dark=dark)
+
+            if normalise:
+                ccddata = ccddata.divide(normalise_func(ccddata.data))
+
             images.append(ccddata)
 
     n_images = len(images)
@@ -149,11 +182,14 @@ def process_fits(fitspath, *,
             master = combiner.median_combine()
 
         # Populate header of combined image with metadata about the processing.
-        master.header['fitspath'] = fitspath
+        master.header['fitspath'] = str(fitspath)
         if obstype:
             master.header['obstype'] = obstype
         if exposure_times:
-            master.header['totalexp'] = exposure_times
+            if len(exposure_times) == 1:
+                master.header['totalexp'] = float(exposure_times.pop())
+            else:
+                master.header['totalexp'] = tuple(exposure_times)
         master.header['nimages'] = n_images
         master.header['combtype'] = combine_type
         master.header['sigclip'] = sigma_clip
@@ -169,20 +205,6 @@ def process_fits(fitspath, *,
             master = images
 
     return master
-
-
-def process_image(ccddata, *,
-                  window=None,
-                  dark=None,
-                  normalise=None):
-    if window:
-        ccddata = trim_image(ccddata[window[1]:window[3]+1, window[0]:window[2]+1])
-    if dark:
-        ccddata = subtract_dark(ccddata,
-                                dark,
-                                exposure_time='totalexp',
-                                exposure_unit=u.second)
-    return ccddata
 
 
 def make_flat(directory,
