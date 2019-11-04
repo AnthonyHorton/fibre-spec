@@ -4,7 +4,8 @@ from pathlib import Path
 
 import numpy as np
 from astropy import units as u
-from ccdproc import CCDData, ImageFileCollection, Combiner, subtract_dark, trim_image
+import ccdproc
+from ccdproc import CCDData, ImageFileCollection, Combiner
 
 
 def process_fits(fitspath, *,
@@ -16,6 +17,9 @@ def process_fits(fitspath, *,
                  percentile_max=None,
                  window=None,
                  darks=None,
+                 cosmic_ray=False,
+                 gain=None,
+                 readnoise=None,
                  normalise=False,
                  normalise_func=np.ma.average,
                  combine_type=None,
@@ -53,6 +57,17 @@ def process_fits(fitspath, *,
     darks: str or sequence, optional
         Filename(s) of dark frame(s) to subtract from the image(s). If given a dark frame with
         matching TOTALEXP will be subtracted from each image during processing.
+    cosmic_ray: bool, optional
+        Whether to perform single image cosmic ray removal, using the lacosmic algorithm,
+        default False. Requires both gain and readnoise to be set.
+    gain: str or astropy.units.Quantity, optional
+        Either a string indicating the FITS keyword corresponding to the (inverse gain), or
+        a Quantity containing the gain value to use. If both gain and read noise are given
+        an uncertainty frame will be created.
+    readnoise: str or astropy.units.Quantity, optional
+        Either a string indicating the FITS keyword corresponding to read noise, or a Quantity
+        containing the read noise value to use. If both read noise and gain are given then an
+        uncertainty frame will be created.
     normalise: bool, optional
         If True each image will be normalised. Default False.
     normalise_func: callable, optional
@@ -91,7 +106,11 @@ def process_fits(fitspath, *,
             dark_filenames = {darks, }
         dark_dict = {}
         for filename in dark_filenames:
-            dark_data = CCDData.read(filename, unit='adu')
+            try:
+                dark_data = CCDData.read(filename)
+            except ValueError:
+                # Might be no units in FITS header. Assume ADU.
+                dark_data = CCDData.read(filename, unit='adu')
             dark_dict[dark_data.header['totalexp']] = dark_data
 
     if combine_type and combine_type not in ('MEAN', 'MEDIAN'):
@@ -118,19 +137,23 @@ def process_fits(fitspath, *,
                 ifc = ifc.filter(object=object)
             except FileNotFoundError:
                 raise RuntimeError("No FITS files with OBJECT={}.".format(object))
-        filenames = ifc.files
+        filenames = [Path(ifc.location).joinpath(filename) for filename in ifc.files]
     else:
         raise ValueError("fitspath '{}' is not an accessible file or directory.".format(fitspath))
 
     # Load image(s) and process them.
     images = []
     for filename in filenames:
-        ccddata = CCDData.read(filename, unit='adu')
+        try:
+            ccddata = CCDData.read(filename)
+        except ValueError:
+            # Might be no units in FITS header. Assume ADU.
+            ccddata = CCDData.read(filename, unit='adu')
         # Filtering by exposure times here because it's hard filter ImageFileCollection
         # with an indeterminate number of possible values.
         if not exposure_times or ccddata.header['totalexp'] in exposure_times:
             if window:
-                ccddata = trim_image(ccddata[window[1]:window[3]+1, window[0]:window[2]+1])
+                ccddata = ccdproc.trim_image(ccddata[window[1]:window[3]+1, window[0]:window[2]+1])
 
             if percentile:
                 # Check percentile value is within specified range, otherwise skip to next image.
@@ -140,12 +163,45 @@ def process_fits(fitspath, *,
 
             if darks:
                 try:
-                    ccddata = subtract_dark(ccddata,
-                                            dark_dict[ccddata.header['totalexp']],
-                                            exposure_time='totalexp',
-                                            exposure_unit=u.second)
+                    ccddata = ccdproc.subtract_dark(ccddata,
+                                                    dark_dict[ccddata.header['totalexp']],
+                                                    exposure_time='totalexp',
+                                                    exposure_unit=u.second)
                 except KeyError:
                     raise RuntimeError("No dark with matching totalexp for {}.".format(filename))
+
+            if gain:
+                if isinstance(gain, str):
+                    egain = ccddata.header[gain]
+                    egain = egain * u.electron / u.adu
+                elif isinstance(gain, u.Quantity):
+                    try:
+                        egain = gain.to(u.electron / u.adu)
+                    except u.UnitsError:
+                        egain = (1 / gain).to(u.electron / u.adu)
+                else:
+                    raise ValueError(f"gain must be a string or Quantity, got {gain}.")
+
+            if readnoise:
+                if isinstance(readnoise, str):
+                    rn = ccddata.header[readnoise]
+                    rn = rn * u.electron
+                elif isinstance(readnoise, u.Quantity):
+                    try:
+                        rn = readnoise.to(u.electron / u.pixel)
+                    except u.UnitsError:
+                        rn = (readnoise * u.pixel).to(u.electron)
+                else:
+                    raise ValueError(f"readnoise must be a string or Quantity, got {readnoise}.")
+
+            if gain and readnoise:
+                ccddata = ccdproc.create_deviation(ccddata, gain=egain, readnoise=rn)
+
+            if cosmic_ray:
+                if not gain and readnoise:
+                    raise ValueError("Cosmic ray removal required both gain & readnoise.")
+
+                ccddata = ccdproc.cosmicray_lacosmic(ccddata, gain=egain, readnoise=rn)
 
             if normalise:
                 ccddata = ccddata.divide(normalise_func(ccddata.data))
