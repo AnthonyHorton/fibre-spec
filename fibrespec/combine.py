@@ -18,6 +18,7 @@ def process_fits(fitspath, *,
                  window=None,
                  darks=None,
                  cosmic_ray=False,
+                 cosmic_ray_kwargs={},
                  gain=None,
                  readnoise=None,
                  normalise=False,
@@ -60,6 +61,8 @@ def process_fits(fitspath, *,
     cosmic_ray: bool, optional
         Whether to perform single image cosmic ray removal, using the lacosmic algorithm,
         default False. Requires both gain and readnoise to be set.
+    cosmic_ray_kwargs: dict, optional
+        Additional keyword arguments to pass to the ccdproc.cosmicray_lacosmic function.
     gain: str or astropy.units.Quantity, optional
         Either a string indicating the FITS keyword corresponding to the (inverse gain), or
         a Quantity containing the gain value to use. If both gain and read noise are given
@@ -195,13 +198,21 @@ def process_fits(fitspath, *,
                     raise ValueError(f"readnoise must be a string or Quantity, got {readnoise}.")
 
             if gain and readnoise:
-                ccddata = ccdproc.create_deviation(ccddata, gain=egain, readnoise=rn)
+                ccddata = ccdproc.create_deviation(ccddata,
+                                                   gain=egain,
+                                                   readnoise=rn,
+                                                   disregard_nan=True)
+
+            if gain:
+                ccddata = ccdproc.gain_correct(ccddata, gain=egain)
 
             if cosmic_ray:
                 if not gain and readnoise:
                     raise ValueError("Cosmic ray removal required both gain & readnoise.")
 
-                ccddata = ccdproc.cosmicray_lacosmic(ccddata, gain=egain, readnoise=rn)
+                ccddata = ccdproc.cosmicray_lacosmic(ccddata,
+                                                     readnoise=rn / u.electron,
+                                                     **cosmic_ray_kwargs)
 
             if normalise:
                 ccddata = ccddata.divide(normalise_func(ccddata.data))
