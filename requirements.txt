@@ -2,4 +2,4 @@ numpy
 scipy
 matplotlib
 astropy
-ccdproc
+ccdproc>=2.1.0

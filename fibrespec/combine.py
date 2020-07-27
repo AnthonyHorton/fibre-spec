@@ -211,7 +211,8 @@ def process_fits(fitspath, *,
                     raise ValueError("Cosmic ray removal required both gain & readnoise.")
 
                 ccddata = ccdproc.cosmicray_lacosmic(ccddata,
-                                                     readnoise=rn / u.electron,
+                                                     gain=1.0,  # ccddata already gain corrected
+                                                     readnoise=rn,
                                                      **cosmic_ray_kwargs)
 
             if normalise:
